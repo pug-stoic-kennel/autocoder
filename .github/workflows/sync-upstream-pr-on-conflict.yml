@@ -14,7 +14,7 @@ permissions:
   pull-requests: write    # create PRs
 
 env:
-  UPSTREAM_REPO: "ORIGINAL_OWNER/ORIGINAL_REPO"  # change this to the upstream repo (owner/repo)
+  UPSTREAM_REPO: "leonvanzyl/autocoder"  # change this to the upstream repo (owner/repo)
   BRANCH: "main"                                 # change to master or whatever branch you want to sync
 
 jobs:
