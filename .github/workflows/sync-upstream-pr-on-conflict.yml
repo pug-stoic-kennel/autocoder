@@ -1,0 +1,103 @@
+# Replace ORIGINAL_OWNER/ORIGINAL_REPO and BRANCH if needed.
+# Behavior:
+# - Attempts a fast-forward update of your fork's BRANCH from upstream/BRANCH and pushes it.
+# - If a fast-forward is not possible (would require a merge with conflicts or non-ff), it creates a new branch
+#   in your fork that points at upstream/BRANCH and opens a pull request from that branch into your BRANCH.
+#   This leaves conflict resolution for you to handle in the PR UI.
+on:
+  schedule:
+    - cron: '0 0 * * *'   # change cadence as needed
+  workflow_dispatch:
+
+permissions:
+  contents: write         # push branches / read content
+  pull-requests: write    # create PRs
+
+env:
+  UPSTREAM_REPO: "ORIGINAL_OWNER/ORIGINAL_REPO"  # change this to the upstream repo (owner/repo)
+  BRANCH: "main"                                 # change to master or whatever branch you want to sync
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Add upstream and fetch
+        run: |
+          git remote add upstream https://github.com/${{ env.UPSTREAM_REPO }}.git || true
+          git fetch upstream --no-tags
+
+      - name: Ensure local branch exists and is up-to-date with origin
+        run: |
+          git fetch origin ${{ env.BRANCH }}:$GITHUB_WORKSPACE/origin-${{ env.BRANCH }} || true
+          # Create/update a local copy of the target branch based on the fork's origin
+          git checkout -B ${{ env.BRANCH }} origin/${{ env.BRANCH }} || git checkout -B ${{ env.BRANCH }}
+
+      - name: Try fast-forward from upstream and push if possible
+        id: try-ff
+        run: |
+          set -e
+          if git merge --ff-only upstream/${{ env.BRANCH }}; then
+            echo "fast_forward=true" >> $GITHUB_OUTPUT
+            git push origin ${{ env.BRANCH }}
+          else
+            echo "fast_forward=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create sync branch and push (if not fast-forward)
+        if: steps.try-ff.outputs.fast_forward == 'false'
+        id: push-branch
+        run: |
+          TIMESTAMP=$(date -u +%Y%m%d%H%M%S)
+          SYNC_BRANCH="sync/upstream-${{ env.BRANCH }}-${TIMESTAMP}"
+          echo "SYNC_BRANCH=$SYNC_BRANCH" >> $GITHUB_OUTPUT
+          # Make a branch that points at the upstream branch (no merge performed locally)
+          git branch -f "$SYNC_BRANCH" upstream/${{ env.BRANCH }}
+          git push --set-upstream origin "$SYNC_BRANCH" --force
+
+      - name: Create or update pull request (if we pushed a sync branch)
+        if: steps.try-ff.outputs.fast_forward == 'false'
+        uses: actions/github-script@v6
+        env:
+          BRANCH: ${{ env.BRANCH }}
+          UPSTREAM_REPO: ${{ env.UPSTREAM_REPO }}
+          SYNC_BRANCH: ${{ steps.push-branch.outputs.SYNC_BRANCH }}
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const head = `${owner}:${process.env.SYNC_BRANCH}`;
+            const base = process.env.BRANCH;
+            // Check for an existing open PR with same head & base
+            const { data: existing } = await github.rest.pulls.list({
+              owner,
+              repo,
+              state: "open",
+              head,
+              base
+            });
+            if (existing.length > 0) {
+              console.log(`Existing PR already open: ${existing[0].html_url}`);
+            } else {
+              const title = `Sync ${process.env.UPSTREAM_REPO}:${base} into ${base}`;
+              const body = `This pull request was created automatically to merge changes from ${process.env.UPSTREAM_REPO}/${base} into ${base} of this fork. Resolve any conflicts in the PR and merge when ready.`;
+              const { data: pr } = await github.rest.pulls.create({
+                owner,
+                repo,
+                title,
+                head,
+                base,
+                body
+              });
+              console.log(`Created PR: ${pr.html_url}`);
+            }
