@@ -33,7 +33,7 @@ function generateId(): string {
 
 export function useSpecChat({
   projectName,
-  onComplete,
+  // onComplete intentionally not used - user clicks "Continue to Project" button instead
   onError,
 }: UseSpecChatOptions): UseSpecChatReturn {
   const [messages, setMessages] = useState<ChatMessage[]>([])
@@ -346,7 +346,7 @@ export function useSpecChat({
         console.error('Failed to parse WebSocket message:', e)
       }
     }
-  }, [projectName, onComplete, onError])
+  }, [projectName, onError])
 
   const start = useCallback(() => {
     connect()

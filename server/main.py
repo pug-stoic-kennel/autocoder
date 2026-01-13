@@ -6,9 +6,15 @@ Main entry point for the Autonomous Coding UI server.
 Provides REST API, WebSocket, and static file serving.
 """
 
+import os
 import shutil
 from contextlib import asynccontextmanager
 from pathlib import Path
+
+from dotenv import load_dotenv
+
+# Load environment variables from .env file if present
+load_dotenv()
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
@@ -18,14 +24,24 @@ from fastapi.staticfiles import StaticFiles
 from .routers import (
     agent_router,
     assistant_chat_router,
+    devserver_router,
+    expand_project_router,
     features_router,
     filesystem_router,
     projects_router,
+    settings_router,
     spec_creation_router,
+    terminal_router,
 )
 from .schemas import SetupStatus
 from .services.assistant_chat_session import cleanup_all_sessions as cleanup_assistant_sessions
-from .services.process_manager import cleanup_all_managers
+from .services.dev_server_manager import (
+    cleanup_all_devservers,
+    cleanup_orphaned_devserver_locks,
+)
+from .services.expand_chat_session import cleanup_all_expand_sessions
+from .services.process_manager import cleanup_all_managers, cleanup_orphaned_locks
+from .services.terminal_manager import cleanup_all_terminals
 from .websocket import project_websocket
 
 # Paths
@@ -36,11 +52,16 @@ UI_DIST_DIR = ROOT_DIR / "ui" / "dist"
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan context manager for startup and shutdown."""
-    # Startup
+    # Startup - clean up orphaned lock files from previous runs
+    cleanup_orphaned_locks()
+    cleanup_orphaned_devserver_locks()
     yield
-    # Shutdown - cleanup all running agents and assistant sessions
+    # Shutdown - cleanup all running agents, sessions, terminals, and dev servers
     await cleanup_all_managers()
     await cleanup_assistant_sessions()
+    await cleanup_all_expand_sessions()
+    await cleanup_all_terminals()
+    await cleanup_all_devservers()
 
 
 # Create FastAPI app
@@ -89,9 +110,13 @@ async def require_localhost(request: Request, call_next):
 app.include_router(projects_router)
 app.include_router(features_router)
 app.include_router(agent_router)
+app.include_router(devserver_router)
 app.include_router(spec_creation_router)
+app.include_router(expand_project_router)
 app.include_router(filesystem_router)
 app.include_router(assistant_chat_router)
+app.include_router(settings_router)
+app.include_router(terminal_router)
 
 
 # ============================================================================
@@ -120,9 +145,15 @@ async def setup_status():
     # Check for Claude CLI
     claude_cli = shutil.which("claude") is not None
 
-    # Check for credentials file
-    credentials_path = Path.home() / ".claude" / ".credentials.json"
-    credentials = credentials_path.exists()
+    # Check for CLI configuration directory
+    # Note: CLI no longer stores credentials in ~/.claude/.credentials.json
+    # The existence of ~/.claude indicates the CLI has been configured
+    claude_dir = Path.home() / ".claude"
+    has_claude_config = claude_dir.exists() and claude_dir.is_dir()
+
+    # If GLM mode is configured via .env, we have alternative credentials
+    glm_configured = bool(os.getenv("ANTHROPIC_BASE_URL") and os.getenv("ANTHROPIC_AUTH_TOKEN"))
+    credentials = has_claude_config or glm_configured
 
     # Check for Node.js and npm
     node = shutil.which("node") is not None

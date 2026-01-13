@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
-import { useProjects, useFeatures, useAgentStatus } from './hooks/useProjects'
+import { useQueryClient } from '@tanstack/react-query'
+import { useProjects, useFeatures, useAgentStatus, useSettings } from './hooks/useProjects'
 import { useProjectWebSocket } from './hooks/useWebSocket'
 import { useFeatureSound } from './hooks/useFeatureSound'
 import { useCelebration } from './hooks/useCelebration'
@@ -12,11 +13,14 @@ import { ProgressDashboard } from './components/ProgressDashboard'
 import { SetupWizard } from './components/SetupWizard'
 import { AddFeatureForm } from './components/AddFeatureForm'
 import { FeatureModal } from './components/FeatureModal'
-import { DebugLogViewer } from './components/DebugLogViewer'
+import { DebugLogViewer, type TabType } from './components/DebugLogViewer'
 import { AgentThought } from './components/AgentThought'
 import { AssistantFAB } from './components/AssistantFAB'
 import { AssistantPanel } from './components/AssistantPanel'
-import { Plus, Loader2 } from 'lucide-react'
+import { ExpandProjectModal } from './components/ExpandProjectModal'
+import { SettingsModal } from './components/SettingsModal'
+import { DevServerControl } from './components/DevServerControl'
+import { Loader2, Settings } from 'lucide-react'
 import type { Feature } from './lib/types'
 
 function App() {
@@ -29,15 +33,21 @@ function App() {
     }
   })
   const [showAddFeature, setShowAddFeature] = useState(false)
+  const [showExpandProject, setShowExpandProject] = useState(false)
   const [selectedFeature, setSelectedFeature] = useState<Feature | null>(null)
   const [setupComplete, setSetupComplete] = useState(true) // Start optimistic
   const [debugOpen, setDebugOpen] = useState(false)
   const [debugPanelHeight, setDebugPanelHeight] = useState(288) // Default height
+  const [debugActiveTab, setDebugActiveTab] = useState<TabType>('agent')
   const [assistantOpen, setAssistantOpen] = useState(false)
+  const [showSettings, setShowSettings] = useState(false)
+  const [isSpecCreating, setIsSpecCreating] = useState(false)
 
+  const queryClient = useQueryClient()
   const { data: projects, isLoading: projectsLoading } = useProjects()
   const { data: features } = useFeatures(selectedProject)
-  const { data: agentStatusData } = useAgentStatus(selectedProject)
+  const { data: settings } = useSettings()
+  useAgentStatus(selectedProject) // Keep polling for status updates
   const wsState = useProjectWebSocket(selectedProject)
 
   // Play sounds when features move between columns
@@ -81,21 +91,54 @@ function App() {
         setDebugOpen(prev => !prev)
       }
 
+      // T : Toggle terminal tab in debug panel
+      if (e.key === 't' || e.key === 'T') {
+        e.preventDefault()
+        if (!debugOpen) {
+          // If panel is closed, open it and switch to terminal tab
+          setDebugOpen(true)
+          setDebugActiveTab('terminal')
+        } else if (debugActiveTab === 'terminal') {
+          // If already on terminal tab, close the panel
+          setDebugOpen(false)
+        } else {
+          // If open but on different tab, switch to terminal
+          setDebugActiveTab('terminal')
+        }
+      }
+
       // N : Add new feature (when project selected)
       if ((e.key === 'n' || e.key === 'N') && selectedProject) {
         e.preventDefault()
         setShowAddFeature(true)
       }
 
-      // A : Toggle assistant panel (when project selected)
-      if ((e.key === 'a' || e.key === 'A') && selectedProject) {
+      // E : Expand project with AI (when project selected and has features)
+      if ((e.key === 'e' || e.key === 'E') && selectedProject && features &&
+          (features.pending.length + features.in_progress.length + features.done.length) > 0) {
+        e.preventDefault()
+        setShowExpandProject(true)
+      }
+
+      // A : Toggle assistant panel (when project selected and not in spec creation)
+      if ((e.key === 'a' || e.key === 'A') && selectedProject && !isSpecCreating) {
         e.preventDefault()
         setAssistantOpen(prev => !prev)
       }
 
+      // , : Open settings
+      if (e.key === ',') {
+        e.preventDefault()
+        setShowSettings(true)
+      }
+
       // Escape : Close modals
       if (e.key === 'Escape') {
-        if (assistantOpen) {
+        if (showExpandProject) {
+          setShowExpandProject(false)
+        } else if (showSettings) {
+          setShowSettings(false)
+        } else if (assistantOpen) {
           setAssistantOpen(false)
         } else if (showAddFeature) {
           setShowAddFeature(false)
@@ -109,7 +152,7 @@ function App() {
 
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [selectedProject, showAddFeature, selectedFeature, debugOpen, assistantOpen])
+  }, [selectedProject, showAddFeature, showExpandProject, selectedFeature, debugOpen, debugActiveTab, assistantOpen, features, showSettings, isSpecCreating])
 
   // Combine WebSocket progress with feature data
   const progress = wsState.progress.total > 0 ? wsState.progress : {
@@ -144,27 +187,40 @@ function App() {
                 selectedProject={selectedProject}
                 onSelectProject={handleSelectProject}
                 isLoading={projectsLoading}
+                onSpecCreatingChange={setIsSpecCreating}
               />
 
               {selectedProject && (
                 <>
-                  <button
-                    onClick={() => setShowAddFeature(true)}
-                    className="neo-btn neo-btn-primary text-sm"
-                    title="Press N"
-                  >
-                    <Plus size={18} />
-                    Add Feature
-                    <kbd className="ml-1.5 px-1.5 py-0.5 text-xs bg-black/20 rounded font-mono">
-                      N
-                    </kbd>
-                  </button>
-
                   <AgentControl
                     projectName={selectedProject}
                     status={wsState.agentStatus}
-                    yoloMode={agentStatusData?.yolo_mode ?? false}
                   />
+
+                  <DevServerControl
+                    projectName={selectedProject}
+                    status={wsState.devServerStatus}
+                    url={wsState.devServerUrl}
+                  />
+
+                  <button
+                    onClick={() => setShowSettings(true)}
+                    className="neo-btn text-sm py-2 px-3"
+                    title="Settings (,)"
+                    aria-label="Open Settings"
+                  >
+                    <Settings size={18} />
+                  </button>
+
+                  {/* GLM Mode Badge */}
+                  {settings?.glm_mode && (
+                    <span
+                      className="px-2 py-1 text-xs font-bold bg-purple-500 text-white rounded border-2 border-black shadow-neo-sm"
+                      title="Using GLM API (configured via .env)"
+                    >
+                      GLM
+                    </span>
+                  )}
                 </>
               )}
             </div>
@@ -223,6 +279,8 @@ function App() {
             <KanbanBoard
               features={features}
               onFeatureClick={setSelectedFeature}
+              onAddFeature={() => setShowAddFeature(true)}
+              onExpandProject={() => setShowExpandProject(true)}
             />
           </div>
         )}
@@ -245,19 +303,37 @@ function App() {
         />
       )}
 
+      {/* Expand Project Modal - AI-powered bulk feature creation */}
+      {showExpandProject && selectedProject && (
+        <ExpandProjectModal
+          isOpen={showExpandProject}
+          projectName={selectedProject}
+          onClose={() => setShowExpandProject(false)}
+          onFeaturesAdded={() => {
+            // Invalidate features query to refresh the kanban board
+            queryClient.invalidateQueries({ queryKey: ['features', selectedProject] })
+          }}
+        />
+      )}
+
       {/* Debug Log Viewer - fixed to bottom */}
       {selectedProject && (
         <DebugLogViewer
           logs={wsState.logs}
+          devLogs={wsState.devLogs}
           isOpen={debugOpen}
           onToggle={() => setDebugOpen(!debugOpen)}
           onClear={wsState.clearLogs}
+          onClearDevLogs={wsState.clearDevLogs}
           onHeightChange={setDebugPanelHeight}
+          projectName={selectedProject}
+          activeTab={debugActiveTab}
+          onTabChange={setDebugActiveTab}
         />
       )}
 
-      {/* Assistant FAB and Panel */}
-      {selectedProject && (
+      {/* Assistant FAB and Panel - hide when expand modal or spec creation is open */}
+      {selectedProject && !showExpandProject && !isSpecCreating && (
         <>
           <AssistantFAB
             onClick={() => setAssistantOpen(!assistantOpen)}
@@ -269,6 +345,11 @@ function App() {
             onClose={() => setAssistantOpen(false)}
           />
         </>
+      )}
+
+      {/* Settings Modal */}
+      {showSettings && (
+        <SettingsModal onClose={() => setShowSettings(false)} />
       )}
     </div>
   )

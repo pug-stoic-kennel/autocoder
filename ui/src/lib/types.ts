@@ -90,6 +90,7 @@ export interface AgentStatusResponse {
   pid: number | null
   started_at: string | null
   yolo_mode: boolean
+  model: string | null  // Model being used by running agent
 }
 
 export interface AgentActionResponse {
@@ -106,8 +107,33 @@ export interface SetupStatus {
   npm: boolean
 }
 
+// Dev Server types
+export type DevServerStatus = 'stopped' | 'running' | 'crashed'
+
+export interface DevServerStatusResponse {
+  status: DevServerStatus
+  pid: number | null
+  url: string | null
+  command: string | null
+  started_at: string | null
+}
+
+export interface DevServerConfig {
+  detected_type: string | null
+  detected_command: string | null
+  custom_command: string | null
+  effective_command: string | null
+}
+
+// Terminal types
+export interface TerminalInfo {
+  id: string
+  name: string
+  created_at: string
+}
+
 // WebSocket message types
-export type WSMessageType = 'progress' | 'feature_update' | 'log' | 'agent_status' | 'pong'
+export type WSMessageType = 'progress' | 'feature_update' | 'log' | 'agent_status' | 'pong' | 'dev_log' | 'dev_server_status'
 
 export interface WSProgressMessage {
   type: 'progress'
@@ -138,12 +164,26 @@ export interface WSPongMessage {
   type: 'pong'
 }
 
+export interface WSDevLogMessage {
+  type: 'dev_log'
+  line: string
+  timestamp: string
+}
+
+export interface WSDevServerStatusMessage {
+  type: 'dev_server_status'
+  status: DevServerStatus
+  url: string | null
+}
+
 export type WSMessage =
   | WSProgressMessage
   | WSFeatureUpdateMessage
   | WSLogMessage
   | WSAgentStatusMessage
   | WSPongMessage
+  | WSDevLogMessage
+  | WSDevServerStatusMessage
 
 // ============================================================================
 // Spec Chat Types
@@ -295,3 +335,62 @@ export type AssistantChatServerMessage =
   | AssistantChatErrorMessage
   | AssistantChatConversationCreatedMessage
   | AssistantChatPongMessage
+
+// ============================================================================
+// Expand Chat Types
+// ============================================================================
+
+export interface ExpandChatFeaturesCreatedMessage {
+  type: 'features_created'
+  count: number
+  features: { id: number; name: string; category: string }[]
+}
+
+export interface ExpandChatCompleteMessage {
+  type: 'expansion_complete'
+  total_added: number
+}
+
+export type ExpandChatServerMessage =
+  | SpecChatTextMessage        // Reuse text message type
+  | ExpandChatFeaturesCreatedMessage
+  | ExpandChatCompleteMessage
+  | SpecChatErrorMessage       // Reuse error message type
+  | SpecChatPongMessage        // Reuse pong message type
+  | SpecChatResponseDoneMessage // Reuse response_done type
+
+// Bulk feature creation
+export interface FeatureBulkCreate {
+  features: FeatureCreate[]
+  starting_priority?: number
+}
+
+export interface FeatureBulkCreateResponse {
+  created: number
+  features: Feature[]
+}
+
+// ============================================================================
+// Settings Types
+// ============================================================================
+
+export interface ModelInfo {
+  id: string
+  name: string
+}
+
+export interface ModelsResponse {
+  models: ModelInfo[]
+  default: string
+}
+
+export interface Settings {
+  yolo_mode: boolean
+  model: string
+  glm_mode: boolean
+}
+
+export interface SettingsUpdate {
+  yolo_mode?: boolean
+  model?: string
+}

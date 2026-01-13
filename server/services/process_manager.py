@@ -18,6 +18,11 @@ from typing import Awaitable, Callable, Literal, Set
 
 import psutil
 
+# Add parent directory to path for shared module imports
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+from auth import AUTH_ERROR_HELP_SERVER as AUTH_ERROR_HELP  # noqa: E402
+from auth import is_auth_error
+
 logger = logging.getLogger(__name__)
 
 # Patterns for sensitive data that should be redacted from output
@@ -74,6 +79,7 @@ class AgentProcessManager:
         self.started_at: datetime | None = None
         self._output_task: asyncio.Task | None = None
         self.yolo_mode: bool = False  # YOLO mode for rapid prototyping
+        self.model: str | None = None  # Model being used
 
         # Support multiple callbacks (for multiple WebSocket clients)
         self._output_callbacks: Set[Callable[[str], Awaitable[None]]] = set()
@@ -185,6 +191,9 @@ class AgentProcessManager:
         if not self.process or not self.process.stdout:
             return
 
+        auth_error_detected = False
+        output_buffer = []  # Buffer recent lines for auth error detection
+
         try:
             loop = asyncio.get_running_loop()
             while True:
@@ -198,6 +207,18 @@ class AgentProcessManager:
                 decoded = line.decode("utf-8", errors="replace").rstrip()
                 sanitized = sanitize_output(decoded)
 
+                # Buffer recent output for auth error detection
+                output_buffer.append(decoded)
+                if len(output_buffer) > 20:
+                    output_buffer.pop(0)
+
+                # Check for auth errors
+                if not auth_error_detected and is_auth_error(decoded):
+                    auth_error_detected = True
+                    # Broadcast auth error help message
+                    for help_line in AUTH_ERROR_HELP.strip().split('\n'):
+                        await self._broadcast_output(help_line)
+
                 await self._broadcast_output(sanitized)
 
         except asyncio.CancelledError:
@@ -209,17 +230,24 @@ class AgentProcessManager:
             if self.process and self.process.poll() is not None:
                 exit_code = self.process.returncode
                 if exit_code != 0 and self.status == "running":
+                    # Check buffered output for auth errors if we haven't detected one yet
+                    if not auth_error_detected:
+                        combined_output = '\n'.join(output_buffer)
+                        if is_auth_error(combined_output):
+                            for help_line in AUTH_ERROR_HELP.strip().split('\n'):
+                                await self._broadcast_output(help_line)
                     self.status = "crashed"
                 elif self.status == "running":
                     self.status = "stopped"
                 self._remove_lock()
 
-    async def start(self, yolo_mode: bool = False) -> tuple[bool, str]:
+    async def start(self, yolo_mode: bool = False, model: str | None = None) -> tuple[bool, str]:
         """
         Start the agent as a subprocess.
 
         Args:
             yolo_mode: If True, run in YOLO mode (no browser testing)
+            model: Model to use (e.g., claude-opus-4-5-20251101)
 
         Returns:
             Tuple of (success, message)
@@ -230,8 +258,9 @@ class AgentProcessManager:
         if not self._check_lock():
             return False, "Another agent instance is already running for this project"
 
-        # Store YOLO mode for status queries
+        # Store for status queries
         self.yolo_mode = yolo_mode
+        self.model = model
 
         # Build command - pass absolute path to project directory
         cmd = [
@@ -240,6 +269,10 @@ class AgentProcessManager:
             "--project-dir",
             str(self.project_dir.resolve()),
         ]
+
+        # Add --model flag if model is specified
+        if model:
+            cmd.extend(["--model", model])
 
         # Add --yolo flag if YOLO mode is enabled
         if yolo_mode:
@@ -306,6 +339,7 @@ class AgentProcessManager:
             self.process = None
             self.started_at = None
             self.yolo_mode = False  # Reset YOLO mode
+            self.model = None  # Reset model
 
             return True, "Agent stopped"
         except Exception as e:
@@ -387,6 +421,7 @@ class AgentProcessManager:
             "pid": self.pid,
             "started_at": self.started_at.isoformat() if self.started_at else None,
             "yolo_mode": self.yolo_mode,
+            "model": self.model,
         }
 
 
@@ -423,3 +458,73 @@ async def cleanup_all_managers() -> None:
 
     with _managers_lock:
         _managers.clear()
+
+
+def cleanup_orphaned_locks() -> int:
+    """
+    Clean up orphaned lock files from previous server runs.
+
+    Scans all registered projects for .agent.lock files and removes them
+    if the referenced process is no longer running.
+
+    Returns:
+        Number of orphaned lock files cleaned up
+    """
+    import sys
+    root = Path(__file__).parent.parent.parent
+    if str(root) not in sys.path:
+        sys.path.insert(0, str(root))
+
+    from registry import list_registered_projects
+
+    cleaned = 0
+    try:
+        projects = list_registered_projects()
+        for name, info in projects.items():
+            project_path = Path(info.get("path", ""))
+            if not project_path.exists():
+                continue
+
+            lock_file = project_path / ".agent.lock"
+            if not lock_file.exists():
+                continue
+
+            try:
+                pid_str = lock_file.read_text().strip()
+                pid = int(pid_str)
+
+                # Check if process is still running
+                if psutil.pid_exists(pid):
+                    try:
+                        proc = psutil.Process(pid)
+                        cmdline = " ".join(proc.cmdline())
+                        if "autonomous_agent_demo.py" in cmdline:
+                            # Process is still running, don't remove
+                            logger.info(
+                                "Found running agent for project '%s' (PID %d)",
+                                name, pid
+                            )
+                            continue
+                    except (psutil.NoSuchProcess, psutil.AccessDenied):
+                        pass
+
+                # Process not running or not our agent - remove stale lock
+                lock_file.unlink(missing_ok=True)
+                cleaned += 1
+                logger.info("Removed orphaned lock file for project '%s'", name)
+
+            except (ValueError, OSError) as e:
+                # Invalid lock file content - remove it
+                logger.warning(
+                    "Removing invalid lock file for project '%s': %s", name, e
+                )
+                lock_file.unlink(missing_ok=True)
+                cleaned += 1
+
+    except Exception as e:
+        logger.error("Error during orphan cleanup: %s", e)
+
+    if cleaned:
+        logger.info("Cleaned up %d orphaned lock file(s)", cleaned)
+
+    return cleaned

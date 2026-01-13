@@ -9,6 +9,8 @@ Uses SQLite database stored at ~/.autocoder/registry.db.
 import logging
 import os
 import re
+import threading
+import time
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
@@ -20,6 +22,29 @@ from sqlalchemy.orm import sessionmaker
 
 # Module logger
 logger = logging.getLogger(__name__)
+
+
+# =============================================================================
+# Model Configuration (Single Source of Truth)
+# =============================================================================
+
+# Available models with display names
+# To add a new model: add an entry here with {"id": "model-id", "name": "Display Name"}
+AVAILABLE_MODELS = [
+    {"id": "claude-opus-4-5-20251101", "name": "Claude Opus 4.5"},
+    {"id": "claude-sonnet-4-5-20250929", "name": "Claude Sonnet 4.5"},
+]
+
+# List of valid model IDs (derived from AVAILABLE_MODELS)
+VALID_MODELS = [m["id"] for m in AVAILABLE_MODELS]
+
+# Default model and settings
+DEFAULT_MODEL = "claude-opus-4-5-20251101"
+DEFAULT_YOLO_MODE = False
+
+# SQLite connection settings
+SQLITE_TIMEOUT = 30  # seconds to wait for database lock
+SQLITE_MAX_RETRIES = 3  # number of retry attempts on busy database
 
 
 # =============================================================================
@@ -62,13 +87,23 @@ class Project(Base):
     created_at = Column(DateTime, nullable=False)
 
 
+class Settings(Base):
+    """SQLAlchemy model for global settings (key-value store)."""
+    __tablename__ = "settings"
+
+    key = Column(String(50), primary_key=True)
+    value = Column(String(500), nullable=False)
+    updated_at = Column(DateTime, nullable=False)
+
+
 # =============================================================================
 # Database Connection
 # =============================================================================
 
-# Module-level singleton for database engine
+# Module-level singleton for database engine with thread-safe initialization
 _engine = None
 _SessionLocal = None
+_engine_lock = threading.Lock()
 
 
 def get_config_dir() -> Path:
@@ -90,20 +125,29 @@ def get_registry_path() -> Path:
 
 def _get_engine():
     """
-    Get or create the database engine (singleton pattern).
+    Get or create the database engine (thread-safe singleton pattern).
 
     Returns:
         Tuple of (engine, SessionLocal)
     """
     global _engine, _SessionLocal
 
+    # Double-checked locking for thread safety
     if _engine is None:
-        db_path = get_registry_path()
-        db_url = f"sqlite:///{db_path.as_posix()}"
-        _engine = create_engine(db_url, connect_args={"check_same_thread": False})
-        Base.metadata.create_all(bind=_engine)
-        _SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=_engine)
-        logger.debug("Initialized registry database at: %s", db_path)
+        with _engine_lock:
+            if _engine is None:
+                db_path = get_registry_path()
+                db_url = f"sqlite:///{db_path.as_posix()}"
+                _engine = create_engine(
+                    db_url,
+                    connect_args={
+                        "check_same_thread": False,
+                        "timeout": SQLITE_TIMEOUT,
+                    }
+                )
+                Base.metadata.create_all(bind=_engine)
+                _SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=_engine)
+                logger.debug("Initialized registry database at: %s", db_path)
 
     return _engine, _SessionLocal
 
@@ -112,6 +156,8 @@ def _get_engine():
 def _get_session():
     """
     Context manager for database sessions with automatic commit/rollback.
+
+    Includes retry logic for SQLite busy database errors.
 
     Yields:
         SQLAlchemy session
@@ -126,6 +172,40 @@ def _get_session():
         raise
     finally:
         session.close()
+
+
+def _with_retry(func, *args, **kwargs):
+    """
+    Execute a database operation with retry logic for busy database.
+
+    Args:
+        func: Function to execute
+        *args, **kwargs: Arguments to pass to the function
+
+    Returns:
+        Result of the function
+
+    Raises:
+        Last exception if all retries fail
+    """
+    last_error = None
+    for attempt in range(SQLITE_MAX_RETRIES):
+        try:
+            return func(*args, **kwargs)
+        except Exception as e:
+            last_error = e
+            error_str = str(e).lower()
+            if "database is locked" in error_str or "sqlite_busy" in error_str:
+                if attempt < SQLITE_MAX_RETRIES - 1:
+                    wait_time = (2 ** attempt) * 0.1  # Exponential backoff: 0.1s, 0.2s, 0.4s
+                    logger.warning(
+                        "Database busy, retrying in %.1fs (attempt %d/%d)",
+                        wait_time, attempt + 1, SQLITE_MAX_RETRIES
+                    )
+                    time.sleep(wait_time)
+                    continue
+            raise
+    raise last_error
 
 
 # =============================================================================
@@ -364,3 +444,75 @@ def list_valid_projects() -> list[dict[str, Any]]:
         return valid
     finally:
         session.close()
+
+
+# =============================================================================
+# Settings CRUD Functions
+# =============================================================================
+
+def get_setting(key: str, default: str | None = None) -> str | None:
+    """
+    Get a setting value by key.
+
+    Args:
+        key: The setting key.
+        default: Default value if setting doesn't exist or on DB error.
+
+    Returns:
+        The setting value, or default if not found or on error.
+    """
+    try:
+        _, SessionLocal = _get_engine()
+        session = SessionLocal()
+        try:
+            setting = session.query(Settings).filter(Settings.key == key).first()
+            return setting.value if setting else default
+        finally:
+            session.close()
+    except Exception as e:
+        logger.warning("Failed to read setting '%s': %s", key, e)
+        return default
+
+
+def set_setting(key: str, value: str) -> None:
+    """
+    Set a setting value (creates or updates).
+
+    Args:
+        key: The setting key.
+        value: The setting value.
+    """
+    with _get_session() as session:
+        setting = session.query(Settings).filter(Settings.key == key).first()
+        if setting:
+            setting.value = value
+            setting.updated_at = datetime.now()
+        else:
+            setting = Settings(
+                key=key,
+                value=value,
+                updated_at=datetime.now()
+            )
+            session.add(setting)
+
+    logger.debug("Set setting '%s' = '%s'", key, value)
+
+
+def get_all_settings() -> dict[str, str]:
+    """
+    Get all settings as a dictionary.
+
+    Returns:
+        Dictionary mapping setting keys to values.
+    """
+    try:
+        _, SessionLocal = _get_engine()
+        session = SessionLocal()
+        try:
+            settings = session.query(Settings).all()
+            return {s.key: s.value for s in settings}
+        finally:
+            session.close()
+    except Exception as e:
+        logger.warning("Failed to read settings: %s", e)
+        return {}

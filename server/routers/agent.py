@@ -26,6 +26,21 @@ def _get_project_path(project_name: str) -> Path:
     return get_project_path(project_name)
 
 
+def _get_settings_defaults() -> tuple[bool, str]:
+    """Get YOLO mode and model defaults from global settings."""
+    import sys
+    root = Path(__file__).parent.parent.parent
+    if str(root) not in sys.path:
+        sys.path.insert(0, str(root))
+
+    from registry import DEFAULT_MODEL, get_all_settings
+
+    settings = get_all_settings()
+    yolo_mode = (settings.get("yolo_mode") or "false").lower() == "true"
+    model = settings.get("model", DEFAULT_MODEL)
+    return yolo_mode, model
+
+
 router = APIRouter(prefix="/api/projects/{project_name}/agent", tags=["agent"])
 
 # Root directory for process manager
@@ -69,6 +84,7 @@ async def get_agent_status(project_name: str):
         pid=manager.pid,
         started_at=manager.started_at,
         yolo_mode=manager.yolo_mode,
+        model=manager.model,
     )
 
 
@@ -80,7 +96,12 @@ async def start_agent(
     """Start the agent for a project."""
     manager = get_project_manager(project_name)
 
-    success, message = await manager.start(yolo_mode=request.yolo_mode)
+    # Get defaults from global settings if not provided in request
+    default_yolo, default_model = _get_settings_defaults()
+    yolo_mode = request.yolo_mode if request.yolo_mode is not None else default_yolo
+    model = request.model if request.model else default_model
+
+    success, message = await manager.start(yolo_mode=yolo_mode, model=model)
 
     return AgentActionResponse(
         success=success,

@@ -4,7 +4,7 @@
 
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import * as api from '../lib/api'
-import type { FeatureCreate } from '../lib/types'
+import type { FeatureCreate, ModelsResponse, Settings, SettingsUpdate } from '../lib/types'
 
 // ============================================================================
 // Projects
@@ -198,5 +198,77 @@ export function useCreateDirectory() {
 export function useValidatePath() {
   return useMutation({
     mutationFn: (path: string) => api.validatePath(path),
+  })
+}
+
+// ============================================================================
+// Settings
+// ============================================================================
+
+// Default models response for placeholder (until API responds)
+const DEFAULT_MODELS: ModelsResponse = {
+  models: [
+    { id: 'claude-opus-4-5-20251101', name: 'Claude Opus 4.5' },
+    { id: 'claude-sonnet-4-5-20250929', name: 'Claude Sonnet 4.5' },
+  ],
+  default: 'claude-opus-4-5-20251101',
+}
+
+const DEFAULT_SETTINGS: Settings = {
+  yolo_mode: false,
+  model: 'claude-opus-4-5-20251101',
+  glm_mode: false,
+}
+
+export function useAvailableModels() {
+  return useQuery({
+    queryKey: ['available-models'],
+    queryFn: api.getAvailableModels,
+    staleTime: 300000, // Cache for 5 minutes - models don't change often
+    retry: 1,
+    placeholderData: DEFAULT_MODELS,
+  })
+}
+
+export function useSettings() {
+  return useQuery({
+    queryKey: ['settings'],
+    queryFn: api.getSettings,
+    staleTime: 60000, // Cache for 1 minute
+    retry: 1,
+    placeholderData: DEFAULT_SETTINGS,
+  })
+}
+
+export function useUpdateSettings() {
+  const queryClient = useQueryClient()
+
+  return useMutation({
+    mutationFn: (settings: SettingsUpdate) => api.updateSettings(settings),
+    onMutate: async (newSettings) => {
+      // Cancel outgoing refetches
+      await queryClient.cancelQueries({ queryKey: ['settings'] })
+
+      // Snapshot previous value
+      const previous = queryClient.getQueryData<Settings>(['settings'])
+
+      // Optimistically update
+      queryClient.setQueryData<Settings>(['settings'], (old) => ({
+        ...DEFAULT_SETTINGS,
+        ...old,
+        ...newSettings,
+      }))
+
+      return { previous }
+    },
+    onError: (_err, _newSettings, context) => {
+      // Rollback on error
+      if (context?.previous) {
+        queryClient.setQueryData(['settings'], context.previous)
+      }
+    },
+    onSettled: () => {
+      queryClient.invalidateQueries({ queryKey: ['settings'] })
+    },
   })
 }

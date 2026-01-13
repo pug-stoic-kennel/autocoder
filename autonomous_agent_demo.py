@@ -32,11 +32,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from agent import run_autonomous_agent
-from registry import get_project_path
-
-# Configuration
-# DEFAULT_MODEL = "claude-sonnet-4-5-20250929"
-DEFAULT_MODEL = "claude-opus-4-5-20251101"
+from registry import DEFAULT_MODEL, get_project_path
 
 
 def parse_args() -> argparse.Namespace:
@@ -62,8 +58,8 @@ Examples:
   python autonomous_agent_demo.py --project-dir my-app --yolo
 
 Authentication:
-  Uses Claude CLI credentials from ~/.claude/.credentials.json
-  Run 'claude login' to authenticate (handled by start.bat/start.sh)
+  Uses Claude CLI authentication (run 'claude login' if not logged in)
+  Authentication is handled by start.bat/start.sh before this runs
         """,
     )
 
