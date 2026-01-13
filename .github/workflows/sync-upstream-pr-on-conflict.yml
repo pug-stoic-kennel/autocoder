@@ -12,6 +12,7 @@ on:
 permissions:
   contents: write         # push branches / read content
   pull-requests: write    # create PRs
+  workflows: write        # update workflows
 
 env:
   UPSTREAM_REPO: "leonvanzyl/autocoder"  # change this to the upstream repo (owner/repo)
